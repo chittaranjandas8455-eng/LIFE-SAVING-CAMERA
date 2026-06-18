@@ -1,0 +1,109 @@
+import cv2
+import numpy as np
+from ultralytics import YOLO
+import time
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+model = YOLO("yolov8n.pt")
+
+cap = cv2.VideoCapture("traffic_video.mp4")
+
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+output_video = cv2.VideoWriter("output_traffic_ai.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+
+line_y = int(height * 0.6)
+vehicle_data = {}
+next_id = 0
+accident_detected = False
+
+COLOR_NAMES = {
+    (0, 0, 255): "Red",
+    (0, 255, 0): "Green",
+    (255, 0, 0): "Blue",
+    (0, 255, 255): "Yellow",
+}
+
+def get_color_name(bgr):
+    b, g, r = bgr
+    min_dist = float('inf')
+    name = "Unknown"
+    for color_bgr, color_name in COLOR_NAMES.items():
+        dist = (b - color_bgr[0])**2 + (g - color_bgr[1])**2 + (r - color_bgr[2])**2
+        if dist < min_dist:
+            min_dist = dist
+            name = color_name
+    return name
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    results = model.track(frame, persist=True, classes=[2, 3, 5, 7])  # car, truck, bus, motorcycle
+
+    for box in results[0].boxes:
+        if box.id is None:
+            continue
+        track_id = int(box.id)
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        cls = int(box.cls)
+        conf = float(box.conf)
+
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
+
+        # Vehicle type
+        vehicle_type = "Car"
+        if cls == 3 or cls == 5:
+            vehicle_type = "Truck"
+        elif cls == 7:
+            vehicle_type = "Bike"
+
+        # Color
+        roi = frame[y1:y2, x1:x2]
+        if roi.size > 0:
+            avg_color = cv2.mean(roi)[:3]
+            color_name = get_color_name(avg_color)
+        else:
+            color_name = "Unknown"
+
+        # Speed estimation (pixels per frame)
+        if track_id in vehicle_data:
+            prev_cx, prev_cy = vehicle_data[track_id]["pos"]
+            distance = np.sqrt((cx - prev_cx)**2 + (cy - prev_cy)**2)
+            speed = distance * fps * 0.05  # rough km/h conversion factor
+        else:
+            speed = 0
+
+        vehicle_data[track_id] = {"pos": (cx, cy), "type": vehicle_type, "color": color_name, "speed": speed}
+
+        # Draw
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label = f"{vehicle_type} {color_name} {speed:.1f}km/h ID:{track_id}"
+        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # Accident detection (sudden stop or overlap)
+        if speed < 5 and track_id in vehicle_data and vehicle_data[track_id]["speed"] > 30:
+            accident_detected = True
+            cv2.putText(frame, "ACCIDENT DETECTED!", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+
+    # Counting line
+    cv2.line(frame, (0, line_y), (width, line_y), (255, 0, 0), 3)
+
+    if accident_detected:
+        cv2.putText(frame, "CALLING AMBULANCE...", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        print("🚨 ACCIDENT DETECTED! Simulated ambulance call sent.")
+
+    output_video.write(frame)
+
+cap.release()
+output_video.release()
+cv2.destroyAllWindows()
+
+print("Processing finished. Output saved as output_traffic_ai.mp4")
